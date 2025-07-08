@@ -13,7 +13,7 @@ import requests
 import socket
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 # Bibliotecas de terceiros
 try:
@@ -25,16 +25,20 @@ try:
     from rich.text import Text
     from rich.box import ROUNDED
     from pytube import YouTube, Playlist
-    from pytube.exceptions import PytubeError, RegexMatchError
+    from pytube.exceptions import PytubeError
+    from slugify import slugify
 except ImportError as e:
     print(f"Erro de importação: {e}. Por favor, instale as dependências necessárias.")
-    print("Execute: pip install rich requests pytube")
+    print("Execute: pip install rich requests pytube python-slugify")
     exit(1)
 
 # --- Configuração e Constantes ---
 SCRIPT_VERSION = "v2.1.0"
-AUTHOR = "Seu Nome"
-CREDITS = f"[bold magenta]{AUTHOR} (2025)[/bold magenta]"
+AUTHOR = "V4mpw0L"
+CREDITS = f"[bold magenta]{AUTHOR} (2024)[/bold magenta]"
+
+# Determinar ambiente (Termux ou outro)
+termux_environment = 'com.termux' in os.environ.get('PREFIX', '')
 
 # Diretórios
 CWD = os.getcwd()
@@ -88,7 +92,7 @@ def print_section(title: str, style: str = "yellow") -> None:
     console.print(f"[bold {style}]{title.upper()}[/bold {style}]")
     console.print(f"[bold {style}]{'='*50}[/bold {style}]\n")
 
-def run_command(command: List[str], message: str, timeout: int = 300) -> bool:
+def run_command(command: str, message: str, timeout: int = 300) -> bool:
     """Executa um comando do sistema com tratamento de erros."""
     print_panel(message, "Executando Comando", "cyan")
     
@@ -105,6 +109,7 @@ def run_command(command: List[str], message: str, timeout: int = 300) -> bool:
             
             process = subprocess.Popen(
                 command, 
+                shell=True,
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
                 text=True
@@ -125,7 +130,7 @@ def run_command(command: List[str], message: str, timeout: int = 300) -> bool:
             if process.returncode != 0:
                 error_msg = f"Erro (code {process.returncode}):\n{stderr.strip()}"
                 print_panel(error_msg, "Falha no Comando", "red")
-                logging.error(f"Comando {' '.join(command)} falhou: {stderr.strip()}")
+                logging.error(f"Comando {command} falhou: {stderr.strip()}")
                 return False
             
             if stdout.strip():
@@ -138,19 +143,13 @@ def run_command(command: List[str], message: str, timeout: int = 300) -> bool:
         print_panel(error_msg, "Tempo Esgotado", "red")
         return False
     except FileNotFoundError:
-        error_msg = f"Comando '{command[0]}' não encontrado"
+        error_msg = f"Comando não encontrado"
         print_panel(error_msg, "Erro", "red")
         return False
     except Exception as e:
         print_panel(str(e), "Erro Inesperado", "red")
-        logging.error(f"Erro ao executar comando {' '.join(command)}: {e}")
+        logging.error(f"Erro ao executar comando {command}: {e}")
         return False
-
-def slugify(text: str) -> str:
-    """Converte texto para formato seguro em nomes de arquivo."""
-    text = re.sub(r'[^\w\s-]', '', text).strip().lower()
-    text = re.sub(r'[\s-]+', '-', text)
-    return text
 
 # --- Funcionalidades do Menu ---
 def update_system() -> None:
@@ -159,20 +158,18 @@ def update_system() -> None:
     print_header()
     print_section("Atualização do Sistema")
     
-    is_termux = 'com.termux' in os.environ.get('PREFIX', '')
-    
     commands = [
-        (['pkg', 'update', '-y'], "Atualizando listas de pacotes...") if is_termux 
-        else (['sudo', 'apt', 'update', '-y'], "Atualizando listas de pacotes..."),
+        ('pkg update -y', "Atualizando listas de pacotes...") if termux_environment 
+        else ('sudo apt update -y', "Atualizando listas de pacotes..."),
         
-        (['pkg', 'upgrade', '-y'], "Atualizando pacotes...") if is_termux
-        else (['sudo', 'apt', 'upgrade', '-y'], "Atualizando pacotes..."),
+        ('pkg upgrade -y', "Atualizando pacotes...") if termux_environment
+        else ('sudo apt upgrade -y', "Atualizando pacotes..."),
         
-        (None, None) if is_termux 
-        else (['sudo', 'apt', 'autoremove', '-y'], "Removendo pacotes não usados..."),
+        (None, None) if termux_environment 
+        else ('sudo apt autoremove -y', "Removendo pacotes não usados..."),
         
-        (None, None) if is_termux
-        else (['sudo', 'apt', 'autoclean', '-y'], "Limpando cache...")
+        (None, None) if termux_environment
+        else ('sudo apt autoclean -y', "Limpando cache...")
     ]
     
     success = True
@@ -189,7 +186,7 @@ def update_system() -> None:
     
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-def ping_host() -> None:
+def ping_site() -> None:
     """Realiza ping para um host."""
     clear_console()
     print_header()
@@ -202,7 +199,8 @@ def ping_host() -> None:
         return
     
     count = "4" if not os.name == 'nt' else "n"
-    run_command(['ping', f'-{count}', '4', host], f"Testando conexão com {host}")
+    command = f"ping -{count} 4 {host}"
+    run_command(command, f"Testando conexão com {host}")
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
 def geolocate_ip() -> None:
@@ -242,7 +240,7 @@ def geolocate_ip() -> None:
     
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-def show_disk_usage() -> None:
+def disk_usage() -> None:
     """Exibe o uso de disco do sistema."""
     clear_console()
     print_header()
@@ -268,7 +266,7 @@ def show_disk_usage() -> None:
     
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-def show_memory_usage() -> None:
+def memory_usage() -> None:
     """Exibe o uso de memória do sistema."""
     clear_console()
     print_header()
@@ -295,6 +293,141 @@ def show_memory_usage() -> None:
     except Exception as e:
         print_panel(f"Erro ao obter uso de memória: {e}", "Erro", "red")
     
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def system_uptime() -> None:
+    """Exibe o tempo de atividade do sistema."""
+    clear_console()
+    print_header()
+    print_section("Tempo de Atividade")
+    
+    try:
+        result = subprocess.run(['uptime'], capture_output=True, text=True, check=True)
+        print_panel(result.stdout.strip(), "Tempo de Atividade", "green")
+    except Exception as e:
+        print_panel(f"Erro ao obter tempo de atividade: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def list_processes() -> None:
+    """Lista processos em execução."""
+    clear_console()
+    print_header()
+    print_section("Processos em Execução")
+    
+    try:
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, check=True)
+        lines = result.stdout.strip().split('\n')
+        
+        table = Table(title="Processos em Execução", box=ROUNDED)
+        headers = lines[0].split()
+        for header in headers:
+            table.add_column(header, style="bold blue")
+        
+        for line in lines[1:]:
+            parts = line.split(maxsplit=10)
+            table.add_row(*parts)
+        
+        console.print(table)
+    except Exception as e:
+        print_panel(f"Erro ao listar processos: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def network_info() -> None:
+    """Exibe informações de rede."""
+    clear_console()
+    print_header()
+    print_section("Informações de Rede")
+    
+    try:
+        result = subprocess.run(['ip', 'addr'], capture_output=True, text=True, check=True)
+        print_panel(result.stdout.strip(), "Informações de Rede", "cyan")
+    except Exception as e:
+        print_panel(f"Erro ao obter informações de rede: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def system_information() -> None:
+    """Exibe informações do sistema."""
+    clear_console()
+    print_header()
+    print_section("Informações do Sistema")
+    
+    try:
+        result = subprocess.run(['neofetch', '--stdout'], capture_output=True, text=True, check=True)
+        print_panel(result.stdout.strip(), "Informações do Sistema", "magenta")
+    except Exception:
+        try:
+            result = subprocess.run(['uname', '-a'], capture_output=True, text=True, check=True)
+            print_panel(result.stdout.strip(), "Informações do Sistema", "magenta")
+        except Exception as e:
+            print_panel(f"Erro ao obter informações do sistema: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def scan_for_malware() -> None:
+    """Verifica o sistema em busca de malware."""
+    clear_console()
+    print_header()
+    print_section("Verificação de Malware")
+    
+    if termux_environment:
+        print_panel("Esta função não está disponível no Termux", "Aviso", "yellow")
+        input("\n[dim]Pressione Enter para continuar...[/dim]")
+        return
+    
+    try:
+        run_command('clamscan --infected --recursive --suppress-ok-results', "Verificando malware...")
+        print_panel("Verificação de malware concluída", "Concluído", "green")
+    except Exception as e:
+        print_panel(f"Erro ao verificar malware: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def check_password_strength() -> None:
+    """Verifica a força de uma senha."""
+    clear_console()
+    print_header()
+    print_section("Verificador de Força de Senha")
+    
+    password = console.input("[bold cyan]Digite a senha para verificar: [/bold cyan]")
+    if not password:
+        console.print("[red]Nenhuma senha fornecida.[/red]")
+        time.sleep(1.5)
+        return
+    
+    strength, color = get_password_strength(password)
+    print_panel(strength, "Força da Senha", color)
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def get_password_strength(password: str) -> Tuple[str, str]:
+    """Determina a força de uma senha."""
+    if len(password) >= 16 and re.search(r'[A-Z]', password) and re.search(r'[a-z]', password) and re.search(r'\d', password) and re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return "Força da senha: Extremamente Forte", "green"
+    elif len(password) >= 12 and re.search(r'[A-Z]', password) and re.search(r'[a-z]', password) and re.search(r'\d', password):
+        return "Força da senha: Forte", "cyan"
+    elif len(password) >= 8 and re.search(r'[A-Za-z]', password) and re.search(r'\d', password):
+        return "Força da senha: Média", "yellow"
+    elif len(password) >= 6:
+        return "Força da senha: Fraca", "red"
+    else:
+        return "Força da senha: Muito Fraca", "magenta"
+
+def perform_traceroute() -> None:
+    """Executa traceroute para um destino."""
+    clear_console()
+    print_header()
+    print_section("Traceroute")
+    
+    destination = console.input("[bold cyan]Digite o destino para traceroute: [/bold cyan]")
+    if not destination:
+        console.print("[red]Nenhum destino especificado.[/red]")
+        time.sleep(1.5)
+        return
+    
+    command = f"traceroute {destination}"
+    run_command(command, f"Executando traceroute para {destination}")
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
 def handle_youtube_download() -> None:
@@ -373,8 +506,8 @@ def handle_youtube_download() -> None:
                         filename=os.path.basename(path)
                     )
                     
-                except RegexMatchError:
-                    progress.print(f"[red]Erro: URL inválida ou vídeo indisponível: {video_url}[/red]")
+                    progress.update(task, completed=stream.filesize)
+                    
                 except Exception as e:
                     progress.print(f"[red]Erro ao processar {video_url}: {str(e)}[/red]")
                     logging.error(f"Falha no download: {video_url} - {str(e)}")
@@ -385,6 +518,58 @@ def handle_youtube_download() -> None:
         print_panel(f"Erro no YouTube Downloader: {e}", "Erro", "red")
     except Exception as e:
         print_panel(f"Erro inesperado: {e}", "Erro", "red")
+    
+    input("\n[dim]Pressione Enter para continuar...[/dim]")
+
+def update_script() -> None:
+    """Atualiza o script via Git."""
+    clear_console()
+    print_header()
+    print_section("Atualização do Script")
+    
+    print_panel(
+        "Esta função tentará atualizar o script usando Git.\n"
+        "Certifique-se de que:\n"
+        "1. O script está em um repositório Git clonado\n"
+        "2. Você tem permissões de escrita\n"
+        "3. Há conexão com a internet",
+        "Aviso",
+        "yellow"
+    )
+    
+    confirm = console.input("\n[bold]Deseja continuar? (S/N): [/bold]").lower()
+    if confirm != 's':
+        return
+    
+    commands = [
+        ('git fetch --all', "Buscando atualizações..."),
+        ('git reset --hard origin/main', "Aplicando atualizações..."),
+        ('git pull', "Finalizando atualização...")
+    ]
+    
+    success = True
+    for cmd, msg in commands:
+        if not run_command(cmd, msg):
+            success = False
+            break
+    
+    if success:
+        print_panel(
+            "Script atualizado com sucesso!\n"
+            "Por favor, execute o script novamente para aplicar as mudanças.",
+            "Atualização Concluída",
+            "green"
+        )
+        exit(0)
+    else:
+        print_panel(
+            "A atualização falhou. Verifique:\n"
+            "- Se está em um repositório Git\n"
+            "- Suas permissões\n"
+            "- Conexão com a internet",
+            "Falha na Atualização",
+            "red"
+        )
     
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
@@ -422,12 +607,13 @@ def temporary_email() -> None:
                     table = Table(
                         title=f"Mensagens para [bold]{email}[/bold]",
                         box=ROUNDED,
-                        header_style="bold magenta"
+                        header_style="bold magenta",
+                        expand=True
                     )
-                    table.add_column("ID", style="dim")
-                    table.add_column("De")
-                    table.add_column("Assunto")
-                    table.add_column("Data")
+                    table.add_column("ID", style="dim", width=8)
+                    table.add_column("De", width=25)
+                    table.add_column("Assunto", width=40)
+                    table.add_column("Data", width=20)
                     
                     if not messages:
                         table.add_row("-", "Nenhuma mensagem", "-", "-", style="dim")
@@ -462,57 +648,6 @@ def temporary_email() -> None:
         print_panel(f"Erro inesperado: {e}", "Erro", "red")
     
     time.sleep(1)
-
-def update_script() -> None:
-    """Atualiza o script via Git."""
-    clear_console()
-    print_header()
-    print_section("Atualização do Script")
-    
-    print_panel(
-        "Esta função tentará atualizar o script usando Git.\n"
-        "Certifique-se de que:\n"
-        "1. O script está em um repositório Git clonado\n"
-        "2. Você tem permissões de escrita\n"
-        "3. Há conexão com a internet",
-        "Aviso",
-        "yellow"
-    )
-    
-    confirm = console.input("\n[bold]Deseja continuar? (S/N): [/bold]").lower()
-    if confirm != 's':
-        return
-    
-    commands = [
-        (['git', 'fetch', '--all'], "Buscando atualizações..."),
-        (['git', 'reset', '--hard', 'origin/main'], "Aplicando atualizações..."),
-        (['git', 'pull'], "Finalizando atualização...")
-    ]
-    
-    success = True
-    for cmd, msg in commands:
-        if not run_command(cmd, msg):
-            success = False
-            break
-    
-    if success:
-        print_panel(
-            "Script atualizado com sucesso!\n"
-            "Por favor, execute o script novamente para aplicar as mudanças.",
-            "Atualização Concluída",
-            "green"
-        )
-        exit(0)
-    else:
-        print_panel(
-            "A atualização falhou. Verifique:\n"
-            "- Se está em um repositório Git\n"
-            "- Suas permissões\n"
-            "- Conexão com a internet",
-            "Falha na Atualização",
-            "red"
-        )
-    
     input("\n[dim]Pressione Enter para continuar...[/dim]")
 
 # --- Menu Principal ---
@@ -523,22 +658,30 @@ def display_menu() -> None:
     
     menu_options = [
         {"title": "Atualizar Sistema", "func": update_system},
-        {"title": "Testar Conexão (Ping)", "func": ping_host},
+        {"title": "Testar Conexão (Ping)", "func": ping_site},
         {"title": "Geolocalizar IP", "func": geolocate_ip},
-        {"title": "Uso de Disco", "func": show_disk_usage},
-        {"title": "Uso de Memória", "func": show_memory_usage},
+        {"title": "Uso de Disco", "func": disk_usage},
+        {"title": "Uso de Memória", "func": memory_usage},
+        {"title": "Tempo de Atividade", "func": system_uptime},
+        {"title": "Processos em Execução", "func": list_processes},
+        {"title": "Informações de Rede", "func": network_info},
+        {"title": "Informações do Sistema", "func": system_information},
+        {"title": "Verificar Malware", "func": scan_for_malware},
+        {"title": "Verificar Força de Senha", "func": check_password_strength},
+        {"title": "Traceroute", "func": perform_traceroute},
         {"title": "YouTube Downloader", "func": handle_youtube_download},
-        {"title": "E-mail Temporário", "func": temporary_email},
         {"title": "Atualizar Script", "func": update_script},
+        {"title": "E-mail Temporário", "func": temporary_email},
     ]
     
     table = Table(
         title="Menu Principal",
         box=ROUNDED,
         header_style="bold blue",
-        show_lines=True
+        show_lines=True,
+        expand=True
     )
-    table.add_column("Opção", style="bold cyan")
+    table.add_column("Opção", style="bold cyan", width=8)
     table.add_column("Descrição", style="green")
     
     for i, option in enumerate(menu_options, 1):
@@ -551,13 +694,20 @@ def main() -> None:
     """Função principal."""
     menu_options = [
         {"title": "Atualizar Sistema", "func": update_system},
-        {"title": "Testar Conexão (Ping)", "func": ping_host},
+        {"title": "Testar Conexão (Ping)", "func": ping_site},
         {"title": "Geolocalizar IP", "func": geolocate_ip},
-        {"title": "Uso de Disco", "func": show_disk_usage},
-        {"title": "Uso de Memória", "func": show_memory_usage},
+        {"title": "Uso de Disco", "func": disk_usage},
+        {"title": "Uso de Memória", "func": memory_usage},
+        {"title": "Tempo de Atividade", "func": system_uptime},
+        {"title": "Processos em Execução", "func": list_processes},
+        {"title": "Informações de Rede", "func": network_info},
+        {"title": "Informações do Sistema", "func": system_information},
+        {"title": "Verificar Malware", "func": scan_for_malware},
+        {"title": "Verificar Força de Senha", "func": check_password_strength},
+        {"title": "Traceroute", "func": perform_traceroute},
         {"title": "YouTube Downloader", "func": handle_youtube_download},
-        {"title": "E-mail Temporário", "func": temporary_email},
         {"title": "Atualizar Script", "func": update_script},
+        {"title": "E-mail Temporário", "func": temporary_email},
     ]
     
     while True:
