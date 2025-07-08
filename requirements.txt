@@ -1,0 +1,8 @@
+pytube
+tqdm
+alive-progress
+requests
+slugify
+colorama
+rich
+lolcat
