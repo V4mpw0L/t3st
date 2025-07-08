@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-PyTools: Suíte de Ferramentas para Linux e Termux
+PyTools: Uma suíte de ferramentas de utilidade para Linux, Termux e Windows.
+Versão avançada com novas funcionalidades, temas e melhorias de desempenho.
 """
 
 import os
@@ -13,726 +14,633 @@ import requests
 import socket
 import re
 import logging
-from typing import List, Dict, Any, Optional
+import sys
+import json
+import yaml
+from typing import List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+import platform
+import psutil  # Nova biblioteca para monitoramento avançado
 
 # Bibliotecas de terceiros
 try:
     from rich.console import Console
+    from rich.theme import Theme
     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
     from rich.table import Table
     from rich.panel import Panel
     from rich.live import Live
-    from rich.text import Text
-    from rich.box import ROUNDED
     from pytube import YouTube, Playlist
     from pytube.exceptions import PytubeError
-    from slugify import slugify
 except ImportError as e:
-    print(f"Erro de importação: {e}. Por favor, instale as dependências necessárias.")
-    print("Execute: pip install rich requests pytube python-slugify")
-    exit(1)
+    is_termux = 'com.termux' in os.environ.get('PREFIX', '')
+    if is_termux:
+        print("Erro de importação. No Termux, instale com: pkg install python-pip && pip install rich requests pytube pyyaml psutil")
+    else:
+        print("Erro de importação. Instale com: pip install rich requests pytube pyyaml psutil")
+    sys.exit(1)
 
 # --- Configuração e Constantes ---
+
+# Informações do Script
 SCRIPT_VERSION = "v2.1.0"
-AUTHOR = "V4mpw0L"
-CREDITS = f"[bold magenta]{AUTHOR} (2024)[/bold magenta]"
+AUTHOR = "V4mpw0L (Revisado e Aprimorado por Grok 3)"
+CREDITS = f"[bold magenta]{AUTHOR} (2025)[/bold magenta]"
 
-# Determinar ambiente (Termux ou outro)
-termux_environment = 'com.termux' in os.environ.get('PREFIX', '')
+# Carrega configurações de um arquivo YAML
+def load_config() -> Dict[str, Any]:
+    """Carrega configurações de um arquivo YAML ou retorna padrões."""
+    default_config = {
+        'video_download_dir': os.path.join(os.getcwd(), 'VideosDownloads'),
+        'audio_download_dir': os.path.join(os.getcwd(), 'AudiosDownloads'),
+        'log_file': 'pytools.log',
+        'theme': 'dark',
+        'max_download_threads': 3
+    }
+    try:
+        with open('pytools_config.yaml', 'r') as f:
+            config = yaml.safe_load(f) or {}
+        return {**default_config, **config}
+    except FileNotFoundError:
+        return default_config
 
-# Diretórios
-CWD = os.getcwd()
-VIDEO_DOWNLOAD_DIR = os.path.join(CWD, "VideosDownloads")
-AUDIO_DOWNLOAD_DIR = os.path.join(CWD, "AudiosDownloads")
+CONFIG = load_config()
+VIDEO_DOWNLOAD_DIR = CONFIG['video_download_dir']
+AUDIO_DOWNLOAD_DIR = CONFIG['audio_download_dir']
+LOG_FILE = CONFIG['log_file']
+MAX_DOWNLOAD_THREADS = CONFIG['max_download_threads']
+
+# Temas personalizados para o Rich
+THEMES = {
+    'dark': Theme({
+        'success': 'bold green',
+        'error': 'bold red',
+        'info': 'bold cyan',
+        'warning': 'bold yellow',
+        'header': 'bold magenta',
+        'highlight': 'bold blue'
+    }),
+    'light': Theme({
+        'success': 'green',
+        'error': 'red',
+        'info': 'cyan',
+        'warning': 'yellow',
+        'header': 'magenta',
+        'highlight': 'blue'
+    })
+}
 
 # Configuração do Console Rich
-console = Console()
+console = Console(theme=THEMES.get(CONFIG['theme'], THEMES['dark']))
 
 # Configuração de Logging
 logging.basicConfig(
-    filename='pytools.log',
+    filename=LOG_FILE,
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Cache para geolocalização
+IP_CACHE_FILE = 'ip_cache.json'
+
 # --- Funções Auxiliares e de UI ---
+
 def clear_console() -> None:
-    """Limpa o console de forma multiplataforma."""
+    """Limpa o console, compatível com Linux, Windows e Termux."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def print_header() -> None:
-    """Exibe o cabeçalho estilizado do programa."""
-    header = Text("""
-╔═╗┬ ┬┌─┐┌─┐┬  ┌─┐
-╠═╝└┬┘│ ││  │  └─┐
-╩   ┴ └─┘└─┘┴─┘└─┘
-""", style="bold blue")
-    version = Text(f"Versão {SCRIPT_VERSION}", style="bold cyan")
-    credits = Text(f"por {AUTHOR}", style="bold magenta")
-    
-    console.print(header, justify="center")
-    console.print(version, justify="center")
-    console.print(credits, justify="center")
-    console.print("")
-
-def print_panel(content: str, title: str, style: str = "blue") -> None:
+def print_panel(content: str, title: str, style: str = "info") -> None:
     """Exibe um painel formatado com Rich."""
-    console.print(Panel.fit(
-        content, 
-        title=f"[bold]{title}[/bold]", 
-        border_style=style, 
-        box=ROUNDED,
-        padding=(1, 2)
-    ))
+    console.print(Panel(content, title=f"[bold]{title}[/bold]", border_style=style, expand=False))
 
-def print_section(title: str, style: str = "yellow") -> None:
-    """Exibe um título de seção formatado."""
-    console.print(f"\n[bold {style}]{'='*50}[/bold {style}]")
-    console.print(f"[bold {style}]{title.upper()}[/bold {style}]")
-    console.print(f"[bold {style}]{'='*50}[/bold {style}]\n")
+def run_command(command: List[str], message: str) -> bool:
+    """
+    Executa um comando de sistema com uma barra de progresso e captura o resultado.
+    Retorna True se bem-sucedido, False caso contrário.
+    """
+    if any(';' in arg or '|' in arg or '&' in arg for arg in command):
+        print_panel("Comando inválido: contém caracteres não permitidos.", "Erro", "error")
+        logging.error(f"Comando bloqueado por segurança: {' '.join(command)}")
+        return False
 
-def run_command(command: str, message: str, timeout: int = 300) -> bool:
-    """Executa um comando do sistema com tratamento de erros."""
-    print_panel(message, "Executando Comando", "cyan")
-    
+    print_panel(message, "Executando Comando", "info")
     try:
         with Progress(
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=None),
-            "[progress.percentage]{task.percentage:>3.0f}%",
+            BarColumn(),
             TimeRemainingColumn(),
             transient=True,
             console=console
         ) as progress:
-            task = progress.add_task("[green]Processando...", total=100)
+            task = progress.add_task("[highlight]Processando...", total=None)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
-            process = subprocess.Popen(
-                command, 
-                shell=True,
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
-                text=True
-            )
-            
-            start_time = time.time()
             while process.poll() is None:
-                if time.time() - start_time > timeout:
-                    process.kill()
-                    raise subprocess.TimeoutExpired(command, timeout)
-                
-                elapsed = min(time.time() - start_time, timeout)
-                progress.update(task, completed=(elapsed/timeout)*100)
                 time.sleep(0.1)
-            
+                progress.update(task, advance=1)
+
             stdout, stderr = process.communicate()
             
             if process.returncode != 0:
-                error_msg = f"Erro (code {process.returncode}):\n{stderr.strip()}"
-                print_panel(error_msg, "Falha no Comando", "red")
-                logging.error(f"Comando {command} falhou: {stderr.strip()}")
+                error_msg = f"Comando falhou com código {process.returncode}.\n[error]Erro:[/error]\n{stderr}"
+                print_panel(error_msg, "Erro", "error")
+                logging.error(f"Comando {' '.join(command)} falhou: {stderr.strip()}")
                 return False
             
-            if stdout.strip():
-                print_panel(stdout.strip(), "Saída do Comando", "green")
-            
-            return True
+            if stdout:
+                console.print(f"[success]Saída:[/success]\n{stdout}")
 
-    except subprocess.TimeoutExpired:
-        error_msg = f"O comando excedeu o tempo limite de {timeout} segundos"
-        print_panel(error_msg, "Tempo Esgotado", "red")
-        return False
+        return True
+
     except FileNotFoundError:
-        error_msg = f"Comando não encontrado"
-        print_panel(error_msg, "Erro", "red")
+        error_msg = f"Comando '{command[0]}' não encontrado. Verifique se está instalado e no PATH."
+        print_panel(error_msg, "Erro", "error")
+        logging.error(error_msg)
         return False
     except Exception as e:
-        print_panel(str(e), "Erro Inesperado", "red")
-        logging.error(f"Erro ao executar comando {command}: {e}")
+        print_panel(str(e), "Erro Inesperado", "error")
+        logging.error(f"Erro ao executar comando {' '.join(command)}: {e}")
         return False
+
+def slugify(text: str) -> str:
+    """Converte um texto em um formato seguro para nome de arquivo (slug)."""
+    text = re.sub(r'[^\w\s-]', '', text).strip().lower()
+    text = re.sub(r'[\s-]+', '-', text)
+    return text[:100]  # Limita o tamanho para evitar nomes de arquivo muito longos
+
+def validate_ip(ip: str) -> bool:
+    """Valida se uma string é um endereço IP válido."""
+    try:
+        socket.inet_aton(ip)
+        return True
+    except socket.error:
+        return False
+
+def validate_domain(domain: str) -> bool:
+    """Valida se uma string é um domínio válido."""
+    pattern = r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, domain))
+
+def check_directory_writable(path: str) -> bool:
+    """Verifica se o diretório é gravável."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        test_file = os.path.join(path, ".test_write")
+        with open(test_file, 'w') as f:
+            f.write("test")
+        os.remove(test_file)
+        return True
+    except (OSError, PermissionError) as e:
+        logging.error(f"Erro ao verificar diretório {path}: {e}")
+        return False
+
+# --- Funções de Cache ---
+
+def load_ip_cache() -> Dict[str, Any]:
+    """Carrega o cache de geolocalização de IPs."""
+    try:
+        with open(IP_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_ip_cache(cache: Dict[str, Any]) -> None:
+    """Salva o cache de geolocalização de IPs."""
+    with open(IP_CACHE_FILE, 'w') as f:
+        json.dump(cache, f, indent=2)
 
 # --- Funcionalidades do Menu ---
-def update_system() -> None:
-    """Atualiza os pacotes do sistema."""
-    clear_console()
-    print_header()
-    print_section("Atualização do Sistema")
-    
-    commands = [
-        ('pkg update -y', "Atualizando listas de pacotes...") if termux_environment 
-        else ('sudo apt update -y', "Atualizando listas de pacotes..."),
-        
-        ('pkg upgrade -y', "Atualizando pacotes...") if termux_environment
-        else ('sudo apt upgrade -y', "Atualizando pacotes..."),
-        
-        (None, None) if termux_environment 
-        else ('sudo apt autoremove -y', "Removendo pacotes não usados..."),
-        
-        (None, None) if termux_environment
-        else ('sudo apt autoclean -y', "Limpando cache...")
-    ]
-    
-    success = True
-    for cmd, msg in commands:
-        if cmd and msg:
-            if not run_command(cmd, msg):
-                success = False
-                break
-    
-    if success:
-        print_panel("Sistema atualizado com sucesso!", "Concluído", "green")
-    else:
-        print_panel("Ocorreram erros durante a atualização", "Aviso", "yellow")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-def ping_site() -> None:
-    """Realiza ping para um host."""
+def update_system() -> None:
+    """Atualiza os pacotes do sistema (APT ou PKG)."""
     clear_console()
-    print_header()
-    print_section("Teste de Ping")
+    console.print("[warning]Iniciando atualização do sistema...[/warning]")
     
-    host = console.input("[bold cyan]Digite o host ou IP para pingar: [/bold cyan]")
+    is_termux = 'com.termux' in os.environ.get('PREFIX', '')
+    
+    if is_termux:
+        commands = [
+            (['pkg', 'update', '-y'], "Atualizando listas de pacotes..."),
+            (['pkg', 'upgrade', '-y'], "Atualizando pacotes instalados..."),
+        ]
+    else:
+        if os.name != 'nt' and os.geteuid() != 0:
+            print_panel("Este comando requer privilégios de administrador. Execute com sudo.", "Erro", "error")
+            return
+        commands = [
+            (['sudo', 'apt', 'update', '-y'], "Atualizando listas de pacotes..."),
+            (['sudo', 'apt', 'upgrade', '-y'], "Atualizando pacotes instalados..."),
+            (['sudo', 'apt', 'autoremove', '-y'], "Removendo pacotes não utilizados..."),
+            (['sudo', 'apt', 'autoclean', '-y'], "Limpando cache de pacotes..."),
+        ]
+
+    all_successful = all(run_command(cmd, msg) for cmd, msg in commands)
+    
+    if all_successful:
+        print_panel("O sistema foi atualizado com sucesso!", "Concluído", "success")
+    else:
+        print_panel("A atualização do sistema encontrou erros.", "Falha", "error")
+    input("\nPressione Enter para continuar...")
+
+def ping_host() -> None:
+    """Pinga um host (website ou IP) e exibe o resultado."""
+    clear_console()
+    host = console.input("[info]Digite o website ou IP para pingar: [/info]").strip()
     if not host:
-        console.print("[red]Nenhum host especificado.[/red]")
-        time.sleep(1.5)
+        console.print("[error]Nenhum host fornecido.[/error]")
         return
-    
-    count = "4" if not os.name == 'nt' else "n"
-    command = f"ping -{count} 4 {host}"
-    run_command(command, f"Testando conexão com {host}")
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
+    if not (validate_ip(host) or validate_domain(host)):
+        console.print("[error]Host inválido. Insira um IP ou domínio válido.[/error]")
+        return
+        
+    console.print(f"\n[warning]Pingando {host}...[/warning]")
+    run_command(['ping', '-c', '4', host], f"Pingando {host}")
+    input("\nPressione Enter para continuar...")
 
 def geolocate_ip() -> None:
-    """Obtém informações de geolocalização para um IP."""
+    """Busca informações de geolocalização de um endereço IP."""
     clear_console()
-    print_header()
-    print_section("Geolocalização de IP")
-    
-    ip = console.input("[bold cyan]Digite o IP para geolocalizar: [/bold cyan]")
-    if not ip:
-        console.print("[red]Nenhum IP especificado.[/red]")
-        time.sleep(1.5)
+    ip = console.input("[info]Digite o IP para geolocalizar: [/info]").strip()
+    if not validate_ip(ip):
+        console.print("[error]IP inválido. Insira um endereço IP válido.[/error]")
         return
-    
-    try:
-        print_panel("Obtendo informações de geolocalização...", "Consultando", "cyan")
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query")
-        data = response.json()
-        
-        if data.get('status') != 'success':
-            raise ValueError(data.get('message', 'Erro desconhecido'))
-        
-        table = Table(show_header=False, box=ROUNDED)
-        table.add_column("Campo", style="bold cyan")
-        table.add_column("Valor", style="green")
-        
-        for key, value in data.items():
-            if key not in ['status', 'message']:
-                table.add_row(key.capitalize(), str(value))
-        
-        print_panel(table, "Resultado da Geolocalização", "green")
-        logging.info(f"Geolocalização bem-sucedida para IP: {ip}")
-        
-    except Exception as e:
-        print_panel(f"Erro ao geolocalizar IP: {e}", "Erro", "red")
-        logging.error(f"Falha na geolocalização para IP {ip}: {e}")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-def disk_usage() -> None:
-    """Exibe o uso de disco do sistema."""
-    clear_console()
-    print_header()
-    print_section("Uso de Disco")
+    ip_cache = load_ip_cache()
+    if ip in ip_cache:
+        data = ip_cache[ip]
+        table = Table(title=f"Geolocalização para [bold]{ip}[/bold] (Cache)", show_header=False)
+    else:
+        try:
+            response = requests.get(f"https://ipinfo.io/{ip}/json")
+            response.raise_for_status()
+            data = response.json()
+            ip_cache[ip] = data
+            save_ip_cache(ip_cache)
+            table = alltid(title=f"Geolocalização para [bold]{ip}[/bold]", show_header=False)
+        except requests.RequestException as e:
+            print_panel(f"Erro ao contatar o serviço de geolocalização: {e}", "Erro de Rede", "error")
+            logging.error(f"Erro de geolocalização para o IP {ip}: {e}")
+            return
+
+    table.add_column("Campo", style="warning")
+    table.add_column("Valor")
+    for key, value in data.items():
+        table.add_row(key.capitalize(), str(value))
     
+    console.print(table)
+    logging.info(f"Geolocalização bem-sucedida para o IP: {ip}")
+    input("\nPressione Enter para continuar...")
+
+def show_disk_usage() -> None:
+    """Exibe o uso de disco do sistema em uma tabela."""
+    clear_console()
     try:
         result = subprocess.run(['df', '-h'], capture_output=True, text=True, check=True)
         lines = result.stdout.strip().split('\n')
         
-        table = Table(title="Espaço em Disco", box=ROUNDED)
-        for header in lines[0].split():
-            table.add_column(header, style="bold blue")
-        
-        for line in lines[1:]:
-            parts = line.split()
-            # Destaca partições com pouco espaço livre
-            style = "red" if int(parts[4].replace('%', '')) > 80 else None
-            table.add_row(*parts, style=style)
-        
-        console.print(table)
-    except Exception as e:
-        print_panel(f"Erro ao obter uso de disco: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def memory_usage() -> None:
-    """Exibe o uso de memória do sistema."""
-    clear_console()
-    print_header()
-    print_section("Uso de Memória")
-    
-    try:
-        result = subprocess.run(['free', '-h'], capture_output=True, text=True, check=True)
-        lines = result.stdout.strip().split('\n')
-        
-        table = Table(title="Uso de Memória", box=ROUNDED)
-        for header in lines[0].split():
-            table.add_column(header, style="bold magenta")
-        
-        for line in lines[1:]:
-            parts = line.split()
-            style = None
-            if parts[0] == 'Mem:':
-                style = "cyan"
-            elif parts[0] == 'Swap:':
-                style = "yellow"
-            table.add_row(*parts, style=style)
-        
-        console.print(table)
-    except Exception as e:
-        print_panel(f"Erro ao obter uso de memória: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def system_uptime() -> None:
-    """Exibe o tempo de atividade do sistema."""
-    clear_console()
-    print_header()
-    print_section("Tempo de Atividade")
-    
-    try:
-        result = subprocess.run(['uptime'], capture_output=True, text=True, check=True)
-        print_panel(result.stdout.strip(), "Tempo de Atividade", "green")
-    except Exception as e:
-        print_panel(f"Erro ao obter tempo de atividade: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def list_processes() -> None:
-    """Lista processos em execução."""
-    clear_console()
-    print_header()
-    print_section("Processos em Execução")
-    
-    try:
-        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, check=True)
-        lines = result.stdout.strip().split('\n')
-        
-        table = Table(title="Processos em Execução", box=ROUNDED)
+        table = Table(title="Uso de Disco", header_style="header")
         headers = lines[0].split()
         for header in headers:
-            table.add_column(header, style="bold blue")
-        
+            table.add_column(header, style="highlight")
+            
         for line in lines[1:]:
-            parts = line.split(maxsplit=10)
-            table.add_row(*parts)
+            table.add_row(*line.split())
+            
+        console.print(table)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print_panel(f"Não foi possível obter o uso de disco: {e}", "Erro", "error")
+    input("\nPressione Enter para continuar...")
+
+def show_memory_usage() -> None:
+    """Exibe o uso de memória e swap do sistema."""
+    clear_console()
+    try:
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        table = Table(title="Uso de Memória e Swap", header_style="header")
+        table.add_column("Tipo", style="highlight")
+        table.add_column("Total")
+        table.add_column("Usado")
+        table.add_column("Livre")
+        table.add_column("Percentual", style="warning")
+        
+        table.add_row("Memória", f"{mem.total / (1024**3):.2f} GB", f"{mem.used / (1024**3):.2f} GB",
+                      f"{mem.available / (1024**3):.2f} GB", f"{mem.percent}%", style="cyan")
+        table.add_row("Swap", f"{swap.total / (1024**3):.2f} GB", f"{swap.used / (1024**3):.2f} GB",
+                      f"{swap.free / (1024**3):.2f} GB", f"{swap.percent}%", style="yellow")
         
         console.print(table)
     except Exception as e:
-        print_panel(f"Erro ao listar processos: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
+        print_panel(f"Não foi possível obter o uso de memória: {e}", "Erro", "error")
+    input("\nPressione Enter para continuar...")
 
-def network_info() -> None:
-    """Exibe informações de rede."""
-    clear_console()
-    print_header()
-    print_section("Informações de Rede")
+def _download_stream(stream, title: str, path: str, p_bar: Progress) -> None:
+    """Função auxiliar para baixar um stream do YouTube com barra de progresso."""
+    task = p_bar.add_task(f"[info]Baixando '{title}'...", total=stream.filesize)
+    
+    def on_progress(stream, chunk, bytes_remaining):
+        p_bar.update(task, completed=stream.filesize - bytes_remaining)
     
     try:
-        result = subprocess.run(['ip', 'addr'], capture_output=True, text=True, check=True)
-        print_panel(result.stdout.strip(), "Informações de Rede", "cyan")
+        yt = stream._monostate
+        yt.register_on_progress_callback(on_progress)
+        temp_path = path + ".temp"
+        stream.download(output_path=os.path.dirname(path), filename=os.path.basename(temp_path))
+        if path.endswith('.mp3'):
+            if not run_command(['ffmpeg', '-i', temp_path, '-vn', '-acodec', 'mp3', path], "Convertendo para MP3..."):
+                raise RuntimeError("Falha na conversão para MP3")
+            os.remove(temp_path)
+        else:
+            os.rename(temp_path, path)
+        p_bar.update(task, completed=stream.filesize)
     except Exception as e:
-        print_panel(f"Erro ao obter informações de rede: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def system_information() -> None:
-    """Exibe informações do sistema."""
-    clear_console()
-    print_header()
-    print_section("Informações do Sistema")
-    
-    try:
-        result = subprocess.run(['neofetch', '--stdout'], capture_output=True, text=True, check=True)
-        print_panel(result.stdout.strip(), "Informações do Sistema", "magenta")
-    except Exception:
-        try:
-            result = subprocess.run(['uname', '-a'], capture_output=True, text=True, check=True)
-            print_panel(result.stdout.strip(), "Informações do Sistema", "magenta")
-        except Exception as e:
-            print_panel(f"Erro ao obter informações do sistema: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def scan_for_malware() -> None:
-    """Verifica o sistema em busca de malware."""
-    clear_console()
-    print_header()
-    print_section("Verificação de Malware")
-    
-    if termux_environment:
-        print_panel("Esta função não está disponível no Termux", "Aviso", "yellow")
-        input("\n[dim]Pressione Enter para continuar...[/dim]")
-        return
-    
-    try:
-        run_command('clamscan --infected --recursive --suppress-ok-results', "Verificando malware...")
-        print_panel("Verificação de malware concluída", "Concluído", "green")
-    except Exception as e:
-        print_panel(f"Erro ao verificar malware: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def check_password_strength() -> None:
-    """Verifica a força de uma senha."""
-    clear_console()
-    print_header()
-    print_section("Verificador de Força de Senha")
-    
-    password = console.input("[bold cyan]Digite a senha para verificar: [/bold cyan]")
-    if not password:
-        console.print("[red]Nenhuma senha fornecida.[/red]")
-        time.sleep(1.5)
-        return
-    
-    strength, color = get_password_strength(password)
-    print_panel(strength, "Força da Senha", color)
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
-
-def get_password_strength(password: str) -> Tuple[str, str]:
-    """Determina a força de uma senha."""
-    if len(password) >= 16 and re.search(r'[A-Z]', password) and re.search(r'[a-z]', password) and re.search(r'\d', password) and re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-        return "Força da senha: Extremamente Forte", "green"
-    elif len(password) >= 12 and re.search(r'[A-Z]', password) and re.search(r'[a-z]', password) and re.search(r'\d', password):
-        return "Força da senha: Forte", "cyan"
-    elif len(password) >= 8 and re.search(r'[A-Za-z]', password) and re.search(r'\d', password):
-        return "Força da senha: Média", "yellow"
-    elif len(password) >= 6:
-        return "Força da senha: Fraca", "red"
-    else:
-        return "Força da senha: Muito Fraca", "magenta"
-
-def perform_traceroute() -> None:
-    """Executa traceroute para um destino."""
-    clear_console()
-    print_header()
-    print_section("Traceroute")
-    
-    destination = console.input("[bold cyan]Digite o destino para traceroute: [/bold cyan]")
-    if not destination:
-        console.print("[red]Nenhum destino especificado.[/red]")
-        time.sleep(1.5)
-        return
-    
-    command = f"traceroute {destination}"
-    run_command(command, f"Executando traceroute para {destination}")
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
+        logging.error(f"Falha no download de '{title}': {e}")
+        p_bar.print(f"[error]Erro ao baixar '{title}': {e}[/error]")
 
 def handle_youtube_download() -> None:
-    """Gerencia downloads do YouTube."""
+    """Gerencia o download de vídeos ou áudios do YouTube."""
     clear_console()
-    print_header()
-    print_section("YouTube Downloader")
-    
-    url = console.input("[bold cyan]URL do vídeo/playlist do YouTube: [/bold cyan]")
+    if not (check_directory_writable(VIDEO_DOWNLOAD_DIR) and check_directory_writable(AUDIO_DOWNLOAD_DIR)):
+        print_panel("Erro: Diretórios de download não são graváveis.", "Erro", "error")
+        return
+
+    url = console.input("[info]Insira a URL do vídeo ou playlist do YouTube: [/info]").strip()
     if not url:
         return
-    
+
     try:
-        # Verifica se é playlist
-        if 'playlist' in url.lower():
+        if 'playlist' in url:
             playlist = Playlist(url)
-            console.print(f"\n[bold]Playlist:[/bold] [cyan]{playlist.title}[/cyan]")
-            console.print(f"[bold]Vídeos:[/bold] [yellow]{len(playlist.videos)}[/yellow]")
-            
-            confirm = console.input("\n[bold]Deseja baixar toda a playlist? (S/N): [/bold]").lower()
-            if confirm != 's':
-                return
-            
+            console.print(f"[warning]Playlist encontrada:[/] [bold]{playlist.title}[/]")
             urls = playlist.video_urls
         else:
             urls = [url]
-        
-        # Tipo de download
-        console.print("\n[bold]Tipo de download:[/bold]")
-        console.print("1. [green]Vídeo (MP4)[/green]")
-        console.print("2. [magenta]Áudio (MP3)[/magenta]")
-        choice = console.input("\n[bold]Escolha (1/2): [/bold]")
-        
-        if choice not in ['1', '2']:
-            console.print("[red]Opção inválida.[/red]", style="red")
-            time.sleep(1.5)
+            
+        choice = console.input("[bold]O que deseja baixar? (1) [success]Vídeo[/success] (2) [header]Áudio (MP3)[/header]: [/bold]").strip()
+        if choice not in ('1', '2'):
+            console.print("[error]Opção inválida.[/error]")
             return
-        
-        # Cria diretórios se não existirem
-        os.makedirs(VIDEO_DOWNLOAD_DIR, exist_ok=True)
-        os.makedirs(AUDIO_DOWNLOAD_DIR, exist_ok=True)
-        
-        # Processa cada URL
+
         with Progress(
-            TextColumn("[bold blue]{task.description}[/bold blue]"),
-            BarColumn(bar_width=None),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
             "[progress.percentage]{task.percentage:>3.0f}%",
             TimeRemainingColumn(),
             console=console
         ) as progress:
-            for video_url in urls:
-                try:
+            with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_THREADS) as executor:
+                futures = []
+                for video_url in urls:
                     yt = YouTube(video_url)
                     safe_title = slugify(yt.title)
-                    
-                    if choice == '1':
-                        stream = yt.streams.filter(progressive=True, file_extension='mp4').get_highest_resolution()
-                        path = os.path.join(VIDEO_DOWNLOAD_DIR, f"{safe_title}.mp4")
-                        desc = f"Baixando vídeo: {yt.title[:30]}..."
-                    else:
-                        stream = yt.streams.filter(only_audio=True).first()
-                        path = os.path.join(AUDIO_DOWNLOAD_DIR, f"{safe_title}.mp3")
-                        desc = f"Baixando áudio: {yt.title[:30]}..."
-                    
-                    task = progress.add_task(desc, total=stream.filesize)
-                    
-                    # Callback de progresso
-                    def on_progress(stream, chunk, bytes_remaining):
-                        progress.update(task, completed=stream.filesize - bytes_remaining)
-                    
-                    yt.register_on_progress_callback(on_progress)
-                    
-                    # Realiza o download
-                    stream.download(
-                        output_path=os.path.dirname(path),
-                        filename=os.path.basename(path)
-                    )
-                    
-                    progress.update(task, completed=stream.filesize)
-                    
-                except Exception as e:
-                    progress.print(f"[red]Erro ao processar {video_url}: {str(e)}[/red]")
-                    logging.error(f"Falha no download: {video_url} - {str(e)}")
-        
-        print_panel("Downloads concluídos com sucesso!", "Concluído", "green")
-        
-    except PytubeError as e:
-        print_panel(f"Erro no YouTube Downloader: {e}", "Erro", "red")
-    except Exception as e:
-        print_panel(f"Erro inesperado: {e}", "Erro", "red")
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
+                    stream = (yt.streams.filter(progressive=True, file_extension='mp4').get_highest_resolution()
+                              if choice == '1' else
+                              yt.streams.filter(only_audio=True).first())
+                    path = os.path.join(VIDEO_DOWNLOAD_DIR if choice == '1' else AUDIO_DOWNLOAD_DIR,
+                                        f"{safe_title}.{'mp4' if choice == '1' else 'mp3'}")
+                    futures.append(executor.submit(_download_stream, stream, yt.title, path, progress))
+                for future in futures:
+                    future.result()
 
-def update_script() -> None:
-    """Atualiza o script via Git."""
-    clear_console()
-    print_header()
-    print_section("Atualização do Script")
-    
-    print_panel(
-        "Esta função tentará atualizar o script usando Git.\n"
-        "Certifique-se de que:\n"
-        "1. O script está em um repositório Git clonado\n"
-        "2. Você tem permissões de escrita\n"
-        "3. Há conexão com a internet",
-        "Aviso",
-        "yellow"
-    )
-    
-    confirm = console.input("\n[bold]Deseja continuar? (S/N): [/bold]").lower()
-    if confirm != 's':
-        return
-    
-    commands = [
-        ('git fetch --all', "Buscando atualizações..."),
-        ('git reset --hard origin/main', "Aplicando atualizações..."),
-        ('git pull', "Finalizando atualização...")
-    ]
-    
-    success = True
-    for cmd, msg in commands:
-        if not run_command(cmd, msg):
-            success = False
-            break
-    
-    if success:
-        print_panel(
-            "Script atualizado com sucesso!\n"
-            "Por favor, execute o script novamente para aplicar as mudanças.",
-            "Atualização Concluída",
-            "green"
-        )
-        exit(0)
-    else:
-        print_panel(
-            "A atualização falhou. Verifique:\n"
-            "- Se está em um repositório Git\n"
-            "- Suas permissões\n"
-            "- Conexão com a internet",
-            "Falha na Atualização",
-            "red"
-        )
-    
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
+        print_panel("Downloads concluídos!", "Sucesso", "success")
+    except PytubeError as e:
+        print_panel(f"Erro do Pytube: {e}", "Erro", "error")
+    except Exception as e:
+        print_panel(f"Ocorreu um erro inesperado: {e}", "Erro", "error")
+
+    input("\nPressione Enter para continuar...")
 
 def temporary_email() -> None:
-    """Gerencia e-mail temporário."""
+    """Gera um e-mail temporário e verifica a caixa de entrada."""
     clear_console()
-    print_header()
-    print_section("E-mail Temporário")
-    
+    console.print("[warning]Aviso: E-mails temporários são públicos e não devem ser usados para dados sensíveis.[/warning]")
     try:
-        # Gera e-mail aleatório
-        response = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1")
+        api_url = "https://www.1secmail.com/api/v1/"
+        response = requests.get(f"{api_url}?action=genRandomMailbox&count=1")
+        response.raise_for_status()
         email = response.json()[0]
         login, domain = email.split('@')
-        
-        print_panel(
-            f"[bold]E-mail temporário gerado:[/bold] [green]{email}[/green]\n\n"
-            "Aguardando mensagens... Pressione [bold red]Ctrl+C[/bold red] para sair.",
-            "E-mail Temporário",
-            "green"
-        )
-        
-        displayed_messages = set()
-        
-        try:
-            with Live(refresh_per_second=4, console=console) as live:
-                while True:
-                    # Verifica caixa de entrada
-                    response = requests.get(
-                        f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}"
-                    )
-                    messages = response.json()
+
+        print_panel(f"Seu e-mail temporário é: [success]{email}[/success]\n"
+                    "Digite 'q' para sair ou aguarde novos e-mails...",
+                    "E-mail Temporário", "success")
+
+        displayed_ids = set()
+        with Live(console=console, screen=False, auto_refresh=False) as live:
+            while True:
+                user_input = console.input("")
+                if user_input.lower() == 'q':
+                    console.print("[warning]Retornando ao menu principal...[/warning]")
+                    break
+
+                check_url = f"{api_url}?action=getMessages&login={login}&domain={domain}"
+                try:
+                    res = requests.get(check_url)
+                    res.raise_for_status()
+                    inbox = res.json()
+
+                    table = Table(title=f"Caixa de Entrada de [bold]{email}[/bold]")
+                    table.add_column("ID", style="dim")
+                    table.add_column("De")
+                    table.add_column("Assunto")
+                    table.add_column("Data")
+
+                    if not inbox:
+                        table.add_row("-", "Caixa de entrada vazia", "-", "-")
                     
-                    # Cria tabela de mensagens
-                    table = Table(
-                        title=f"Mensagens para [bold]{email}[/bold]",
-                        box=ROUNDED,
-                        header_style="bold magenta",
-                        expand=True
-                    )
-                    table.add_column("ID", style="dim", width=8)
-                    table.add_column("De", width=25)
-                    table.add_column("Assunto", width=40)
-                    table.add_column("Data", width=20)
-                    
-                    if not messages:
-                        table.add_row("-", "Nenhuma mensagem", "-", "-", style="dim")
-                    
-                    for msg in messages:
-                        if msg['id'] not in displayed_messages:
-                            # Notifica nova mensagem
-                            print_panel(
-                                f"[bold]Nova mensagem de:[/bold] {msg['from']}\n"
-                                f"[bold]Assunto:[/bold] {msg['subject']}",
-                                "Nova Mensagem Recebida!",
-                                "yellow"
-                            )
-                            displayed_messages.add(msg['id'])
-                        
-                        table.add_row(
-                            str(msg['id']),
-                            msg['from'],
-                            msg['subject'],
-                            msg['date']
-                        )
-                    
-                    live.update(table)
+                    for mail in inbox:
+                        table.add_row(str(mail['id']), mail['from'], mail['subject'], mail['date'])
+                        if mail['id'] not in displayed_ids:
+                            print_panel(f"Novo E-mail de: {mail['from']}\nAssunto: {mail['subject']}",
+                                        "Novo E-mail!", "warning")
+                            displayed_ids.add(mail['id'])
+
+                    live.update(table, refresh=True)
                     time.sleep(5)
-                    
-        except KeyboardInterrupt:
-            console.print("\n[bold yellow]Saindo do e-mail temporário...[/bold yellow]")
-        
+                
+                except requests.RequestException:
+                    time.sleep(10)
+
     except requests.RequestException as e:
-        print_panel(f"Erro de conexão: {e}", "Erro", "red")
+        print_panel(f"Não foi possível conectar à API de e-mail: {e}", "Erro de Rede", "error")
     except Exception as e:
-        print_panel(f"Erro inesperado: {e}", "Erro", "red")
+        print_panel(f"Ocorreu um erro: {e}", "Erro", "error")
     
     time.sleep(1)
-    input("\n[dim]Pressione Enter para continuar...[/dim]")
 
-# --- Menu Principal ---
-def display_menu() -> None:
-    """Exibe o menu principal."""
+def update_script() -> None:
+    """Atualiza o script a partir de um repositório Git."""
     clear_console()
-    print_header()
+    def get_current_branch() -> Optional[str]:
+        try:
+            result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            return None
+
+    branch = get_current_branch() or 'main'
+    print_panel(f"Tentando atualizar o script via Git (branch: {branch})...", "Atualização", "warning")
     
-    menu_options = [
-        {"title": "Atualizar Sistema", "func": update_system},
-        {"title": "Testar Conexão (Ping)", "func": ping_site},
-        {"title": "Geolocalizar IP", "func": geolocate_ip},
-        {"title": "Uso de Disco", "func": disk_usage},
-        {"title": "Uso de Memória", "func": memory_usage},
-        {"title": "Tempo de Atividade", "func": system_uptime},
-        {"title": "Processos em Execução", "func": list_processes},
-        {"title": "Informações de Rede", "func": network_info},
-        {"title": "Informações do Sistema", "func": system_information},
-        {"title": "Verificar Malware", "func": scan_for_malware},
-        {"title": "Verificar Força de Senha", "func": check_password_strength},
-        {"title": "Traceroute", "func": perform_traceroute},
-        {"title": "YouTube Downloader", "func": handle_youtube_download},
-        {"title": "Atualizar Script", "func": update_script},
-        {"title": "E-mail Temporário", "func": temporary_email},
+    commands = [
+        (['git', 'fetch', 'origin'], "Buscando atualizações remotas..."),
+        (['git', 'reset', '--hard', f'origin/{branch}'], f"Resetando para a versão remota ({branch})..."),
     ]
+
+    if all(run_command(cmd, msg) for cmd, msg in commands):
+        print_panel("Script atualizado com sucesso!\nPor favor, reinicie o script para aplicar as mudanças.",
+                    "Sucesso", "success")
+        sys.exit(0)
+    else:
+        print_panel("A atualização via Git “‘falhou. Verifique se você clonou o repositório "
+                    "e se o Git está configurado corretamente.", "Falha", "error")
+    input("\nPressione Enter para continuar...")
+
+def show_system_info() -> None:
+    """Exibe informações detalhadas do sistema."""
+    clear_console()
+    table = Table(title="Informações do Sistema", show_header=False)
+    table.add_column("Campo", style="warning")
+    table.add_column("Valor")
+    table.add_row("Versão do Script", SCRIPT_VERSION)
+    table.add_row("Sistema Operacional", platform.system())
+    table.add_row("Versão do Sistema", platform.release())
+    table.add_row("Versão do Python", sys.version.split()[0])
+    table.add_row("Diretório Atual", os.getcwd())
+    table.add_row("Tema Atual", CONFIG['theme'])
+    table.add_row("Memória Total", f"{psutil.virtual_memory().total / (1024**3):.2f} GB")
+    console.print(table)
+    input("\nPressione Enter para continuar...")
+
+def check_network_status() -> None:
+    """Verifica o status da conexão de rede."""
+    clear_console()
+    console.print("[info]Verificando status da rede...[/info]")
+    try:
+        # Tenta conectar a um servidor confiável
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        console.print("[success]Conexão de rede ativa![/success]")
+        
+        # Obtém informações de interfaces de rede
+        table = Table(title="Interfaces de Rede", header_style="header")
+        table.add_column("Interface", style="highlight")
+        table.add_column("Endereço IP")
+        table.add_column("Status")
+        
+        for interface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    status = psutil.net_if_stats()[interface].isup
+                    table.add_row(interface, addr.address, "Ativa" if status else "Inativa", style="success" if status else "error")
+        
+        console.print(table)
+    except socket.error:
+        print_panel("Sem conexão de rede. Verifique sua internet.", "Erro de Rede", "error")
+    except Exception as e:
+        print_panel(f"Erro ao verificar rede: {e}", "Erro", "error")
+    input("\nPressione Enter para continuar...")
+
+def clean_temp_files() -> None:
+    """Remove arquivos temporários do sistema."""
+    clear_console()
+    temp_dirs = [os.path.join(os.getenv('TEMP', '/tmp') if os.name == 'nt' else '/tmp')]
+    console.print("[warning]Limpando arquivos temporários...[/warning]")
     
-    table = Table(
-        title="Menu Principal",
-        box=ROUNDED,
-        header_style="bold blue",
-        show_lines=True,
-        expand=True
-    )
-    table.add_column("Opção", style="bold cyan", width=8)
-    table.add_column("Descrição", style="green")
+    total_size = 0
+    file_count = 0
+    
+    for temp_dir in temp_dirs:
+        try:
+            for root, _, files in os.walk(temp_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        total_size += os.path.getsize(file_path)
+                        os.remove(file_path)
+                        file_count += 1
+                    except (OSError, PermissionError):
+                        continue
+            print_panel(f"Removidos {file_count} arquivos, liberando {(total_size / (1024**2)):.2f} MB.",
+                        "Limpeza Concluída", "success")
+        except Exception as e:
+            print_panel(f"Erro ao limpar arquivos temporários: {e}", "Erro", "error")
+    
+    input("\nPressione Enter para continuar...")
+
+# --- Menu Principal e Execução ---
+
+def display_main_menu(menu_options: List[Dict[str, Any]]) -> None:
+    """Exibe o menu principal de opções."""
+    clear_console()
+    
+    logo = """
+[header]  ____        _   _   _  ____  _      _      
+ |  _ \ _   _| |_| |_| |/ ___|| |    | |     
+ | |_) | | | | __| __| | |    | |    | |     
+ |  __/| |_| | |_| |_| | |___ | |___ | |___  
+ |_|    \__, |\__|\__|_|\____||_____||_____| 
+        |___/                                
+    [/header]
+    """
+    console.print(logo, justify="center")
+    console.print(f"[info]Version {SCRIPT_VERSION}[/info]", justify="center")
+    console.print(CREDITS, justify="center")
+    
+    menu_table = Table(show_header=False, box=None)
+    menu_table.add_column(style="info")
+    menu_table.add_column()
     
     for i, option in enumerate(menu_options, 1):
-        table.add_row(str(i), option['title'])
+        menu_table.add_row(f"{i}.", option['title'])
     
-    table.add_row("0", "[bold red]Sair[/bold red]")
-    console.print(table)
+    console.print(menu_table)
+    console.print(f"[error]{len(menu_options) + 1}.[/error] Sair")
 
 def main() -> None:
-    """Função principal."""
+    """Função principal que executa o loop do menu."""
+    
     menu_options = [
-        {"title": "Atualizar Sistema", "func": update_system},
-        {"title": "Testar Conexão (Ping)", "func": ping_site},
-        {"title": "Geolocalizar IP", "func": geolocate_ip},
-        {"title": "Uso de Disco", "func": disk_usage},
-        {"title": "Uso de Memória", "func": memory_usage},
-        {"title": "Tempo de Atividade", "func": system_uptime},
-        {"title": "Processos em Execução", "func": list_processes},
-        {"title": "Informações de Rede", "func": network_info},
-        {"title": "Informações do Sistema", "func": system_information},
-        {"title": "Verificar Malware", "func": scan_for_malware},
-        {"title": "Verificar Força de Senha", "func": check_password_strength},
-        {"title": "Traceroute", "func": perform_traceroute},
-        {"title": "YouTube Downloader", "func": handle_youtube_download},
-        {"title": "Atualizar Script", "func": update_script},
+        {"title": "Atualizar o sistema", "func": update_system},
+        {"title": "Pingar um website ou IP", "func": ping_host},
+        {"title": "Geolocalizar um IP", "func": geolocate_ip},
+        {"title": "Ver Uso de Disco", "func": show_disk_usage},
+        {"title": "Ver Uso de Memória", "func": show_memory_usage},
+        {"title": "Download de Vídeo/Áudio do YouTube", "func": handle_youtube_download},
         {"title": "E-mail Temporário", "func": temporary_email},
+        {"title": "Atualizar este Script (via Git)", "func": update_script},
+        {"title": "Informações do Sistema", "func": show_system_info},
+        {"title": "Verificar Status da Rede", "func": check_network_status},
+        {"title": "Limpar Arquivos Temporários", "func": clean_temp_files},
     ]
     
     while True:
+        display_main_menu(menu_options)
         try:
-            display_menu()
-            choice = console.input("\n[bold]Escolha uma opção: [/bold]")
-            
-            if choice == '0':
-                console.print("\n[bold green]Obrigado por usar PyTools![/bold green]")
-                break
-            
-            if not choice.isdigit() or not (1 <= int(choice) <= len(menu_options)):
-                console.print("[red]Opção inválida![/red]")
+            choice_str = console.input("\n[bold]Escolha uma opção: [/bold]").strip()
+            if not choice_str.isdigit():
+                console.print("[error]Entrada inválida. Por favor, insira um número.[/error]")
                 time.sleep(1.5)
                 continue
+                
+            choice = int(choice_str)
             
-            menu_options[int(choice)-1]['func']()
-            
+            if 1 <= choice <= len(menu_options):
+                menu_options[choice - 1]['func']()
+            elif choice == len(menu_options) + 1:
+                console.print("[warning]Saindo... Até logo![/warning]")
+                break
+            else:
+                console.print("[error]Opção inválida. Tente novamente.[/error]")
+                time.sleep(1.5)
+
         except KeyboardInterrupt:
-            console.print("\n[bold yellow]Saindo...[/bold yellow]")
+            console.print("\n[warning]Saindo... Até logo![/warning]")
             break
         except Exception as e:
-            logging.error(f"Erro no menu principal: {e}")
-            console.print(f"[red]Erro inesperado: {e}[/red]")
-            time.sleep(2)
+            logging.error(f"Erro inesperado no menu principal: {e}")
+            print_panel(f"Ocorreu um erro crítico: {e}", "Erro Fatal", "error")
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
